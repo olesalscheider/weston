@@ -25,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #ifdef HAVE_LCMS
 #include <lcms2.h>
@@ -63,6 +65,19 @@ weston_cms_set_color_profile(struct weston_output *o,
 	uint16_t *red = NULL;
 	uint16_t *green = NULL;
 	uint16_t *blue = NULL;
+	int fd;
+
+	fd = open(p->filename, 0);
+	if (fd == -1) {
+		weston_log("Failed to open ICC profile %s\n", p->filename);
+		return;
+	}
+	o->colorspace = weston_colorspace_from_fd(fd , 0, o->compositor);
+	close(fd);
+	if (o->colorspace == NULL) {
+		weston_log("Failed to read ICC profile for output %s\n", o->name);
+		o->colorspace = &o->compositor->srgb_colorspace;
+	}
 
 	if (!o->set_gamma)
 		return;
@@ -96,13 +111,18 @@ weston_cms_set_color_profile(struct weston_output *o,
 }
 
 void
-weston_cms_destroy_profile(struct weston_color_profile *p)
+weston_cms_destroy_profile(struct weston_output *o,
+			   struct weston_color_profile *p)
 {
 	if (!p)
 		return;
 #ifdef HAVE_LCMS
 	cmsCloseProfile(p->lcms_handle);
 #endif
+
+	weston_colorspace_destroy(o->colorspace);
+	o->colorspace = &o->compositor->srgb_colorspace;
+
 	free(p->filename);
 	free(p);
 }

@@ -3655,6 +3655,22 @@ weston_compositor_remove_output(struct weston_compositor *compositor,
 	}
 }
 
+static void
+weston_output_notifier_profile(struct wl_listener *listener, void *data)
+{
+	struct weston_output *output = (struct weston_output *) data;
+	struct weston_compositor *compositor = output->compositor;
+	struct wl_resource *cms_resource;
+	struct wl_resource *output_resource;
+
+	wl_resource_for_each(cms_resource, &compositor->cms_list) {
+		wl_resource_for_each(output_resource, &output->resource_list) {
+			wl_cms_send_output_colorspace_changed(cms_resource,
+							      output_resource);
+		}
+	}
+}
+
 WL_EXPORT void
 weston_output_destroy(struct weston_output *output)
 {
@@ -3875,9 +3891,13 @@ weston_output_init(struct weston_output *output, struct weston_compositor *c,
 
 	wl_signal_init(&output->frame_signal);
 	wl_signal_init(&output->destroy_signal);
+	wl_signal_init(&output->profile_signal);
 	wl_list_init(&output->animation_list);
 	wl_list_init(&output->resource_list);
 	wl_list_init(&output->feedback_list);
+
+	output->profile_listener.notify = weston_output_notifier_profile;
+	wl_signal_add(&output->profile_signal, &output->profile_listener);
 
 	output->id = ffs(~output->compositor->output_id_pool) - 1;
 	output->compositor->output_id_pool |= 1 << output->id;
@@ -4392,6 +4412,7 @@ static const struct wl_cms_interface cms_interface = {
 static void
 bind_cms(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 {
+	struct weston_compositor *compositor = data;
 	struct wl_resource *resource;
 
 	resource = wl_resource_create(client, &wl_cms_interface, 1, id);
@@ -4400,7 +4421,9 @@ bind_cms(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 		return;
 	}
 
-	wl_resource_set_implementation(resource, &cms_interface, data, NULL);
+	wl_list_insert(&compositor->cms_list, wl_resource_get_link(resource));
+	wl_resource_set_implementation(resource, &cms_interface, data,
+				       unbind_resource);
 }
 #endif
 
@@ -4526,6 +4549,7 @@ weston_compositor_init(struct weston_compositor *ec,
 	wl_list_init(&ec->layer_list);
 	wl_list_init(&ec->seat_list);
 	wl_list_init(&ec->output_list);
+	wl_list_init(&ec->cms_list);
 	wl_list_init(&ec->key_binding_list);
 	wl_list_init(&ec->modifier_binding_list);
 	wl_list_init(&ec->button_binding_list);

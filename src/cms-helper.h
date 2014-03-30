@@ -67,6 +67,7 @@ weston_cms_create_profile(const char *filename,
 struct weston_color_profile *
 weston_cms_load_profile(const char *filename);
 void
-weston_cms_destroy_profile(struct weston_color_profile *p);
+weston_cms_destroy_profile(struct weston_output *o,
+			   struct weston_color_profile *p);
 
 #endif

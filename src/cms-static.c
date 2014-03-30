@@ -58,6 +58,7 @@ cms_output_created(struct cms_static *cms, struct weston_output *o)
 		weston_log("cms-static: loading %s for %s\n",
 			   profile, o->name);
 		weston_cms_set_color_profile(o, p);
+		wl_signal_emit(&o->profile_signal, o);
 	}
 }
 

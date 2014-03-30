@@ -155,8 +155,9 @@ colord_update_output_from_device (struct cms_output *ocms)
 	gint percentage;
 
 	/* old profile is no longer valid */
-	weston_cms_destroy_profile(ocms->p);
+	weston_cms_destroy_profile(ocms->o, ocms->p);
 	ocms->p = NULL;
+	wl_signal_emit(&ocms->o->profile_signal, ocms->o);
 
 	ret = cd_device_connect_sync(ocms->device, NULL, &error);
 	if (!ret) {
@@ -380,6 +381,7 @@ colord_dispatch_all_pending(int fd, uint32_t mask, void *data)
 		}
 
 		weston_cms_set_color_profile(ocms->o, ocms->p);
+		wl_signal_emit(&ocms->o->profile_signal, ocms->o);
 	}
 	g_list_free (cms->pending);
 	cms->pending = NULL;

@@ -222,6 +222,8 @@ struct weston_output {
 	int dirty;
 	struct wl_signal frame_signal;
 	struct wl_signal destroy_signal;
+	struct wl_signal profile_signal;
+	struct wl_listener profile_listener;
 	int move_x, move_y;
 	uint32_t frame_time; /* presentation timestamp in milliseconds */
 	uint64_t msc;        /* media stream counter */
@@ -652,6 +654,7 @@ struct weston_compositor {
 	struct wl_list layer_list;
 	struct wl_list view_list;
 	struct wl_list plane_list;
+	struct wl_list cms_list;
 	struct wl_list key_binding_list;
 	struct wl_list modifier_binding_list;
 	struct wl_list button_binding_list;
