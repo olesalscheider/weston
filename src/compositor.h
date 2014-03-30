@@ -32,6 +32,7 @@ extern "C" {
 #include <time.h>
 #include <pixman.h>
 #include <xkbcommon/xkbcommon.h>
+#include <glib.h>
 
 #define WL_HIDE_DEPRECATED
 #include <wayland-server.h>
@@ -42,6 +43,10 @@ extern "C" {
 #include "zalloc.h"
 #include "timeline-object.h"
 
+#ifdef HAVE_LCMS
+#include <lcms2.h>
+#endif
+
 #ifndef MIN
 #define MIN(x,y) (((x) < (y)) ? (x) : (y))
 #endif
@@ -51,6 +56,8 @@ extern "C" {
 #define container_of(ptr, type, member) ({				\
 	const __typeof__( ((type *)0)->member ) *__mptr = (ptr);	\
 	(type *)( (char *)__mptr - offsetof(type,member) );})
+
+#define CLUT_DEFAULT_GRID_POINTS 64
 
 struct weston_transform {
 	struct weston_matrix matrix;
@@ -175,6 +182,24 @@ enum dpms_enum {
 	WESTON_DPMS_OFF
 };
 
+struct weston_clut {
+	unsigned points;
+	char *data;
+};
+
+struct weston_colorspace {
+#ifdef HAVE_LCMS
+	cmsHPROFILE lcms_handle;
+#endif
+	struct weston_clut clut;
+
+	int destroyable;
+	int refcount;
+	int input;
+
+	struct weston_compositor *compositor;
+};
+
 struct weston_output {
 	uint32_t id;
 	char *name;
@@ -215,6 +240,8 @@ struct weston_output {
 	struct weston_mode *current_mode;
 	struct weston_mode *original_mode;
 	struct wl_list mode_list;
+
+	struct weston_colorspace *colorspace;
 
 	void (*start_repaint_loop)(struct weston_output *output);
 	int (*repaint)(struct weston_output *output,
@@ -668,6 +695,11 @@ struct weston_compositor {
 	clockid_t presentation_clock;
 
 	int exit_code;
+
+	struct weston_colorspace srgb_colorspace;
+	struct weston_colorspace blending_colorspace;
+	GHashTable *input_colorspaces;
+	GHashTable *output_colorspaces;
 };
 
 struct weston_buffer {
@@ -847,6 +879,9 @@ struct weston_surface_state {
 	/* wl_surface.set_scaling_factor */
 	/* wl_viewport.set */
 	struct weston_buffer_viewport buffer_viewport;
+
+	/* wl_cms.set_colorspace*/
+	struct weston_colorspace *colorspace;
 };
 
 struct weston_surface {
@@ -889,6 +924,8 @@ struct weston_surface {
 	int32_t width_from_buffer; /* before applying viewport */
 	int32_t height_from_buffer;
 	bool keep_buffer; /* for backends to prevent early release */
+
+	struct weston_colorspace *colorspace;
 
 	/* wl_viewport resource for this surface */
 	struct wl_resource *viewport_resource;
@@ -1442,6 +1479,12 @@ weston_stable_fade_run(struct weston_view *front_view, float start,
 struct weston_view_animation *
 weston_slide_run(struct weston_view *view, float start, float stop,
 		 weston_view_animation_done_func_t done, void *data);
+
+struct weston_colorspace *
+weston_colorspace_from_fd(int fd, int input, struct weston_compositor *ec);
+
+void
+weston_colorspace_destroy(struct weston_colorspace *colorspace);
 
 void
 weston_surface_set_color(struct weston_surface *surface,

@@ -58,6 +58,7 @@
 #include "compositor.h"
 #include "scaler-server-protocol.h"
 #include "presentation_timing-server-protocol.h"
+#include "cms-server-protocol.h"
 #include "../shared/os-compatibility.h"
 #include "git-version.h"
 #include "version.h"
@@ -552,7 +553,8 @@ surface_state_handle_buffer_destroy(struct wl_listener *listener, void *data)
 }
 
 static void
-weston_surface_state_init(struct weston_surface_state *state)
+weston_surface_state_init(struct weston_surface_state *state,
+			  struct weston_compositor *compositor)
 {
 	state->newly_attached = 0;
 	state->buffer = NULL;
@@ -573,6 +575,8 @@ weston_surface_state_init(struct weston_surface_state *state)
 	state->buffer_viewport.buffer.src_width = wl_fixed_from_int(-1);
 	state->buffer_viewport.surface.width = -1;
 	state->buffer_viewport.changed = 0;
+
+	state->colorspace = &compositor->srgb_colorspace;
 }
 
 static void
@@ -610,6 +614,187 @@ weston_surface_state_set_buffer(struct weston_surface_state *state,
 			      &state->buffer_destroy_listener);
 }
 
+#if HAVE_LCMS
+static void
+weston_free_clut(struct weston_clut *clut)
+{
+	clut->points = 0;
+	free(clut->data);
+	clut->data = NULL;
+}
+
+static int
+weston_build_clut(struct weston_colorspace *colorspace)
+{
+	cmsHTRANSFORM xform;
+	unsigned r, g, b;
+	cmsHPROFILE input_profile, output_profile;
+	cmsUInt8Number input_id[16];
+	cmsUInt8Number output_id[16];
+	struct weston_clut *clut = &colorspace->clut;
+	struct weston_compositor *ec = colorspace->compositor;
+
+	weston_free_clut(clut);
+
+	if (colorspace->input) {
+		input_profile = colorspace->lcms_handle;
+		output_profile = ec->blending_colorspace.lcms_handle;
+	} else {
+		input_profile = ec->blending_colorspace.lcms_handle;
+		output_profile = colorspace->lcms_handle;
+	}
+
+	/* Check if the input and output profiles are the same. We don't need a
+	   LUT if they are. */
+	cmsGetHeaderProfileID(input_profile, input_id);
+	cmsGetHeaderProfileID(output_profile, output_id);
+	if (memcmp(input_id, output_id, 16) == 0)
+		return 1;
+
+	/* Use the default number of grid points for now. We might want to
+	   adjust this based on the profiles at some point. */
+	clut->points = CLUT_DEFAULT_GRID_POINTS;
+
+	xform = cmsCreateTransform(input_profile, TYPE_RGB_8, output_profile,
+				   TYPE_RGB_8, INTENT_PERCEPTUAL, 0);
+	if (!xform)
+		return 0;
+
+	clut->data = malloc(clut->points * clut->points * clut->points *
+			    3 * sizeof(char));
+	if (!clut->data) {
+		cmsDeleteTransform(xform);
+		return 0;
+	}
+
+	for (b = 0; b < clut->points; b++)
+		for (g = 0; g < clut->points; g++)
+			for (r = 0; r < clut->points; r++) {
+				char in[3];
+				unsigned entry = 3 * (r + clut->points *
+						 (g + clut->points * b));
+				const float step = 255.0 / (clut->points - 1);
+				in[0] = (char) (r * step + 0.5);
+				in[1] = (char) (g * step + 0.5);
+				in[2] = (char) (b * step + 0.5);
+				cmsDoTransform(xform, in,
+					       &clut->data[entry], 1);
+			}
+
+	cmsDeleteTransform(xform);
+	return 1;
+}
+
+WL_EXPORT struct weston_colorspace *
+weston_colorspace_from_fd(int fd, int input, struct weston_compositor *ec)
+{
+	FILE *profile;
+	cmsHPROFILE lcms_handle;
+	cmsUInt8Number profile_id[17];
+	struct weston_colorspace *colorspace;
+
+	profile = fdopen(fd, "r");
+	if (!profile)
+		goto err_0;
+
+	lcms_handle = cmsOpenProfileFromStream(profile, "r");
+	if (!lcms_handle)
+		goto err_0;
+
+	if (!cmsMD5computeID(lcms_handle))
+		goto err_1;
+
+	cmsGetHeaderProfileID(lcms_handle, profile_id);
+	profile_id[16] = '\0';
+
+	if (input)
+		colorspace = g_hash_table_lookup(ec->input_colorspaces,
+						 profile_id);
+	else
+		colorspace = g_hash_table_lookup(ec->output_colorspaces,
+						 profile_id);
+	if (colorspace) {
+		colorspace->refcount++;
+
+		cmsCloseProfile(lcms_handle);
+		return colorspace;
+	}
+
+	colorspace = calloc(1, sizeof(struct weston_colorspace));
+	if (!colorspace)
+		goto err_1;
+
+	colorspace->refcount = 1;
+	colorspace->destroyable = 1;
+	colorspace->input = input;
+	colorspace->lcms_handle = lcms_handle;
+	colorspace->compositor = ec;
+
+	if (!weston_build_clut(colorspace))
+		goto err_2;
+
+	g_hash_table_insert(ec->input_colorspaces,
+			    g_strdup((const gchar *) profile_id),
+			    colorspace);
+
+	return colorspace;
+
+err_2:
+	free(colorspace);
+err_1:
+	cmsCloseProfile(lcms_handle);
+	return NULL;
+err_0:
+	close(fd);
+	return NULL;
+}
+
+/* This function is called when a color space is removed from the hash table */
+static void
+weston_colorspace_free(struct weston_colorspace *colorspace)
+{
+	if (!colorspace->destroyable)
+		return;
+
+	cmsCloseProfile(colorspace->lcms_handle);
+
+	weston_free_clut(&colorspace->clut);
+	free(colorspace);
+}
+
+WL_EXPORT void
+weston_colorspace_destroy(struct weston_colorspace *colorspace)
+{
+	cmsUInt8Number profile_id[17];
+
+	if (!colorspace->destroyable)
+		return;
+
+	colorspace->refcount--;
+	if (colorspace->refcount > 0)
+		return;
+
+	cmsGetHeaderProfileID(colorspace->lcms_handle, profile_id);
+	profile_id[16] = '\0';
+
+	if (colorspace->input)
+		g_hash_table_remove(colorspace->compositor->input_colorspaces,
+				    profile_id);
+	else
+		g_hash_table_remove(colorspace->compositor->output_colorspaces,
+				    profile_id);
+
+}
+
+static void
+weston_colorspace_resource_destroy(struct wl_resource *cms_colorspace)
+{
+	struct weston_colorspace *colorspace =
+		wl_resource_get_user_data(cms_colorspace);
+	weston_colorspace_destroy(colorspace);
+}
+#endif
+
 WL_EXPORT struct weston_surface *
 weston_surface_create(struct weston_compositor *compositor)
 {
@@ -629,7 +814,9 @@ weston_surface_create(struct weston_compositor *compositor)
 	surface->buffer_viewport.buffer.src_width = wl_fixed_from_int(-1);
 	surface->buffer_viewport.surface.width = -1;
 
-	weston_surface_state_init(&surface->pending);
+	surface->colorspace = &compositor->srgb_colorspace;
+
+	weston_surface_state_init(&surface->pending, compositor);
 
 	pixman_region32_init(&surface->damage);
 	pixman_region32_init(&surface->opaque);
@@ -2447,6 +2634,8 @@ weston_surface_commit_state(struct weston_surface *surface,
 	wl_list_insert_list(&surface->feedback_list,
 			    &state->feedback_list);
 	wl_list_init(&state->feedback_list);
+
+	surface->colorspace = state->colorspace;
 }
 
 static void
@@ -2686,6 +2875,8 @@ weston_subsurface_commit_to_cache(struct weston_subsurface *sub)
 		surface->pending.buffer_viewport.buffer;
 	sub->cached.buffer_viewport.surface =
 		surface->pending.buffer_viewport.surface;
+
+	sub->cached.colorspace = surface->colorspace;
 
 	weston_surface_reset_pending_buffer(surface);
 
@@ -3160,7 +3351,7 @@ weston_subsurface_create(uint32_t id, struct weston_surface *surface,
 				       sub, subsurface_resource_destroy);
 	weston_subsurface_link_surface(sub, surface);
 	weston_subsurface_link_parent(sub, parent);
-	weston_surface_state_init(&sub->cached);
+	weston_surface_state_init(&sub->cached, surface->compositor);
 	sub->cached_buffer_ref.buffer = NULL;
 	sub->synchronized = 1;
 
@@ -3479,6 +3670,10 @@ weston_output_destroy(struct weston_output *output)
 	wl_signal_emit(&output->compositor->output_destroyed_signal, output);
 	wl_signal_emit(&output->destroy_signal, output);
 
+#ifdef HAVE_LCMS
+	weston_colorspace_destroy(output->colorspace);
+#endif
+
 	free(output->name);
 	pixman_region32_fini(&output->region);
 	pixman_region32_fini(&output->previous_damage);
@@ -3670,6 +3865,7 @@ weston_output_init(struct weston_output *output, struct weston_compositor *c,
 	output->mm_height = mm_height;
 	output->dirty = 1;
 	output->original_scale = scale;
+	output->colorspace = &c->srgb_colorspace;
 
 	weston_output_transform_scale_init(output, transform, scale);
 	weston_output_init_zoom(output);
@@ -4033,6 +4229,181 @@ bind_presentation(struct wl_client *client,
 	presentation_send_clock_id(resource, compositor->presentation_clock);
 }
 
+#ifdef HAVE_LCMS
+static void
+cms_colorspace_destroy(struct wl_client *client,
+		       struct wl_resource *cms_colorspace)
+{
+	wl_resource_destroy(cms_colorspace);
+}
+
+static void
+cms_colorspace_get_profile_fd(struct wl_client *client,
+			      struct wl_resource *cms_colorspace)
+{
+	struct weston_colorspace *colorspace =
+		wl_resource_get_user_data(cms_colorspace);
+	char template[24];
+	FILE *profilefile;
+	int fd = -1;
+
+	strncpy(template, "/tmp/weston-cms-XXXXXX", 24);
+	fd = mkstemp(template);
+	profilefile = fdopen(fd, "w");
+	cmsSaveProfileToStream(colorspace->lcms_handle, profilefile);
+	rewind(profilefile);
+
+	wl_cms_colorspace_send_profile_data(cms_colorspace, fd);
+
+	close(fd);
+}
+
+static const struct wl_cms_colorspace_interface cms_colorspace_interface = {
+	cms_colorspace_destroy,
+	cms_colorspace_get_profile_fd
+};
+
+static void
+cms_set_colorspace(struct wl_client *client, struct wl_resource *cms,
+		   struct wl_resource *surface_resource,
+		   struct wl_resource *colorspace_resource)
+{
+	struct weston_surface *surface =
+		wl_resource_get_user_data(surface_resource);
+
+	struct weston_colorspace *colorspace =
+		wl_resource_get_user_data(colorspace_resource);
+	surface->pending.colorspace = colorspace;
+}
+
+static void
+cms_colorspace_from_fd(struct wl_client *client, struct wl_resource *cms,
+		       int fd, uint32_t id)
+{
+	struct weston_compositor *compositor =
+		wl_resource_get_user_data(cms);
+
+	struct weston_colorspace *colorspace;
+	struct wl_resource *colorspace_resource;
+
+	colorspace = weston_colorspace_from_fd(fd, 1, compositor);
+	if (colorspace == NULL) {
+		wl_resource_post_error(cms,
+				       WL_CMS_ERROR_INVALID_PROFILE,
+				       "the passed ICC profile is not valid");
+		return;
+	}
+
+	colorspace_resource = wl_resource_create(client,
+						 &wl_cms_colorspace_interface,
+						 1, id);
+	if (colorspace_resource == NULL) {
+		weston_colorspace_destroy(colorspace);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(colorspace_resource,
+				       &cms_colorspace_interface, colorspace,
+				       weston_colorspace_resource_destroy);
+}
+
+static void
+cms_output_colorspace(struct wl_client *client, struct wl_resource *cms,
+		      struct wl_resource *output_resource, uint32_t id)
+{
+	struct weston_output *output =
+		wl_resource_get_user_data(output_resource);
+
+	struct weston_colorspace *colorspace;
+	struct wl_resource *colorspace_resource;
+
+	colorspace = output->colorspace;
+	colorspace->refcount++;
+
+	colorspace_resource = wl_resource_create(client,
+						 &wl_cms_colorspace_interface,
+						 1, id);
+	if (colorspace_resource == NULL) {
+		weston_colorspace_destroy(colorspace);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(colorspace_resource,
+				       &cms_colorspace_interface, colorspace,
+				       weston_colorspace_resource_destroy);
+}
+
+static void
+cms_srgb_colorspace(struct wl_client *client, struct wl_resource *cms,
+		    uint32_t id)
+{
+	struct weston_compositor *compositor =
+		wl_resource_get_user_data(cms);
+	struct weston_colorspace *colorspace;
+	struct wl_resource *colorspace_resource;
+
+	colorspace = &compositor->srgb_colorspace;
+
+	colorspace_resource = wl_resource_create(client,
+						 &wl_cms_colorspace_interface,
+						 1, id);
+	if (colorspace_resource == NULL) {
+		weston_colorspace_destroy(colorspace);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(colorspace_resource,
+				       &cms_colorspace_interface, colorspace,
+				       weston_colorspace_resource_destroy);
+}
+
+static void
+cms_blending_colorspace(struct wl_client *client, struct wl_resource *cms,
+			uint32_t id)
+{
+	struct weston_compositor *compositor =
+		wl_resource_get_user_data(cms);
+	struct weston_colorspace *colorspace;
+	struct wl_resource *colorspace_resource;
+
+	colorspace = &compositor->blending_colorspace;
+
+	colorspace_resource = wl_resource_create(client,
+						 &wl_cms_colorspace_interface,
+						 1, id);
+	if (colorspace_resource == NULL) {
+		weston_colorspace_destroy(colorspace);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(colorspace_resource,
+				       &cms_colorspace_interface, colorspace,
+				       weston_colorspace_resource_destroy);
+}
+
+static const struct wl_cms_interface cms_interface = {
+	cms_set_colorspace,
+	cms_colorspace_from_fd,
+	cms_output_colorspace,
+	cms_srgb_colorspace,
+	cms_blending_colorspace
+};
+
+static void
+bind_cms(struct wl_client *client, void *data, uint32_t version, uint32_t id)
+{
+	struct wl_resource *resource;
+
+	resource = wl_resource_create(client, &wl_cms_interface, 1, id);
+	if (resource == NULL) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+
+	wl_resource_set_implementation(resource, &cms_interface, data, NULL);
+}
+#endif
+
 static void
 compositor_bind(struct wl_client *client,
 		void *data, uint32_t version, uint32_t id)
@@ -4143,6 +4514,12 @@ weston_compositor_init(struct weston_compositor *ec,
 	if (!wl_global_create(ec->wl_display, &presentation_interface, 1,
 			      ec, bind_presentation))
 		return -1;
+
+#ifdef HAVE_LCMS
+	if (!wl_global_create(display, &wl_cms_interface, 1,
+			      ec, bind_cms))
+		return -1;
+#endif
 
 	wl_list_init(&ec->view_list);
 	wl_list_init(&ec->plane_list);
@@ -4816,6 +5193,10 @@ int main(int argc, char *argv[])
 	struct wl_client *primary_client;
 	struct wl_listener primary_client_destroyed;
 	struct weston_seat *seat;
+#ifdef HAVE_LCMS
+	cmsUInt8Number srgb_id[17];
+	cmsUInt8Number blending_id[17];
+#endif
 
 	const struct weston_option core_options[] = {
 		{ WESTON_OPTION_STRING, "backend", 'B', &backend },
@@ -4911,6 +5292,62 @@ int main(int argc, char *argv[])
 	ec->default_pointer_grab = NULL;
 	ec->exit_code = EXIT_SUCCESS;
 
+#ifdef HAVE_LCMS
+	ec->input_colorspaces =
+		g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+				      (GDestroyNotify) weston_colorspace_free);
+	ec->output_colorspaces =
+		g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+				      (GDestroyNotify) weston_colorspace_free);
+
+	ec->srgb_colorspace.destroyable = 0;
+	ec->srgb_colorspace.input = 1;
+	ec->srgb_colorspace.compositor = ec;
+	ec->blending_colorspace.destroyable = 0;
+	ec->blending_colorspace.input = 1;
+	ec->blending_colorspace.compositor = ec;
+
+	ec->srgb_colorspace.lcms_handle = cmsCreate_sRGBProfile();
+	/* TODO: We should really use a linear blending space. But this would
+	 * cause additional banding since we only use an 8 bit LUT for now. */
+	ec->blending_colorspace.lcms_handle = cmsCreate_sRGBProfile();
+
+	if (!weston_build_clut(&ec->srgb_colorspace)) {
+		weston_log("fatal: failed to build SRGB CLUT\n");
+		ret = EXIT_FAILURE;
+		goto out;
+	}
+	/* This is unnecessary but will initialize everything with 0 */
+	if (!weston_build_clut(&ec->blending_colorspace)) {
+		weston_log("fatal: failed to build blending CLUT\n");
+		ret = EXIT_FAILURE;
+		goto out;
+	}
+
+	if (!cmsMD5computeID(ec->srgb_colorspace.lcms_handle)) {
+		weston_log("fatal: failed to compute MD5 sum of SRGB profile\n");
+		ret = EXIT_FAILURE;
+		goto out;
+	}
+	if (!cmsMD5computeID(ec->blending_colorspace.lcms_handle)) {
+		weston_log("fatal: failed to compute MD5 sum of blending profile\n");
+		ret = EXIT_FAILURE;
+		goto out;
+	}
+
+	cmsGetHeaderProfileID(ec->srgb_colorspace.lcms_handle, srgb_id);
+	cmsGetHeaderProfileID(ec->blending_colorspace.lcms_handle, blending_id);
+	srgb_id[16] = '\0';
+	blending_id[16] = '\0';
+
+	g_hash_table_insert(ec->input_colorspaces,
+			    g_strdup((const gchar *) srgb_id),
+			    &ec->srgb_colorspace);
+	g_hash_table_insert(ec->input_colorspaces,
+			    g_strdup((const gchar *) blending_id),
+			    &ec->srgb_colorspace);
+#endif
+
 	for (i = 1; i < argc; i++)
 		weston_log("fatal: unhandled option: %s\n", argv[i]);
 	if (argc > 1) {
@@ -4988,6 +5425,14 @@ out:
 	ec->state = WESTON_COMPOSITOR_OFFSCREEN;
 
 	wl_signal_emit(&ec->destroy_signal, ec);
+
+#ifdef HAVE_LCMS
+	g_hash_table_unref(ec->input_colorspaces);
+	g_hash_table_unref(ec->output_colorspaces);
+
+	weston_free_clut(&ec->srgb_colorspace.clut);
+	/* The blending colorspace cannot have a clut */
+#endif
 
 	weston_compositor_xkb_destroy(ec);
 
