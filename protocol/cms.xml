@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="cms">
+
+  <copyright>
+    Copyright © 2014 Niels Ole Salscheider
+
+    Permission to use, copy, modify, distribute, and sell this
+    software and its documentation for any purpose is hereby granted
+    without fee, provided that the above copyright notice appear in
+    all copies and that both that copyright notice and this permission
+    notice appear in supporting documentation, and that the name of
+    the copyright holders not be used in advertising or publicity
+    pertaining to distribution of the software without specific,
+    written prior permission.  The copyright holders make no
+    representations about the suitability of this software for any
+    purpose.  It is provided "as is" without express or implied
+    warranty.
+
+    THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
+    SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+    FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+    AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+    ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+    THIS SOFTWARE.
+  </copyright>
+
+  <interface name="wl_cms" version="1">
+    <description summary="allows attaching a color space to a wl_surface">
+      This interface allows attaching a color space to a wl_surface. This is
+      used by the compositor to display the colors correctly. For this, the
+      compositor converts any attached surfaces to the blending color space
+      before the blending operations. After blending, the output surface is
+      converted to the color space of the output device.
+      This interface also provides requests for the sRGB and the blending color
+      space. It further allows creation of a color space from an ICC profile.
+      The client is informed by an event if the color space of one of the
+      outputs changes.
+    </description>
+
+    <request name="set_colorspace">
+      <description summary="set the color space of a wl_surface">
+        With this request, the color space of a wl_surface can be set.
+        The sRGB colorspace is attached to a surface before set_colorspace is
+        called for the first time.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface" />
+      <arg name="colorspace" type="object" interface="wl_cms_colorspace" />
+    </request>
+
+    <request name="colorspace_from_fd">
+      <description summary="creates a color space from an ICC profile">
+        This request allows creation of a wl_cms_colorspace object from an ICC
+        profile. The fd argument is the file descriptor to the ICC profile (ICC
+        V2 or V4).
+      </description>
+      <arg name="fd" type="fd" />
+      <arg name="id" type="new_id" interface="wl_cms_colorspace" />
+    </request>
+
+    <request name="output_colorspace">
+      <description summary="returns the color space for the requested output">
+        This request returns a wl_cms_colorspace object for the requested
+        output. A client can use this when it does not want its surfaces to be
+        color-corrected. In this case it can attach the color space of its main
+        output to its surfaces.
+      </description>
+      <arg name="output" type="object" interface="wl_output" />
+      <arg name="id" type="new_id" interface="wl_cms_colorspace" />
+    </request>
+
+    <request name="srgb_colorspace">
+      <description summary="tell the client what blending space is used">
+        This request returns a wl_cms_colorspace object for the sRGB color
+        space. The sRGB color space is initially attached to all surfaces.
+      </description>
+      <arg name="id" type="new_id" interface="wl_cms_colorspace" />
+    </request>
+
+    <request name="blending_colorspace">
+      <description summary="tell the client what blending space is used">
+        This request returns a wl_cms_colorspace object for the blending color
+        space of the compositor. All surfaces are converted by the compositor
+        to the blending color space before the blending operations. Once the
+        blending is performed, a further color conversion to the output color
+        spaces is carried out by the compositor.
+        A client should render in the blending color space returned by this
+        request if it does any color conversion on its own. This allows the
+        compositor to skip the color conversion to the blending color space.
+      </description>
+      <arg name="id" type="new_id" interface="wl_cms_colorspace" />
+    </request>
+
+    <event name="output_colorspace_changed">
+      <description summary="tell the client what color space an output has">
+        This event will be sent when the color space of an output is changed.
+      </description>
+      <arg name="output" type="object" interface="wl_output" />
+    </event>
+
+    <enum name="error">
+      <entry name="invalid_profile" value="0"
+             summary="the passed icc data is invalid" />
+    </enum>
+  </interface>
+
+  <interface name="wl_cms_colorspace" version="1">
+    <description summary="represents a color space">
+      This interface represents a color space that can be attached to surfaces.
+      It is used by the wl_cms interface.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroys the wl_cms_colorspace object">
+        Informs the server that the client will not be using this protocol
+        object anymore.
+      </description>
+    </request>
+
+    <request name="get_profile_fd">
+      <description summary="get a file descriptor to the profile data">
+        This request will cause a profile_fd event that returns a file
+        descriptor to the ICC profile data of this colorspace.
+      </description>
+    </request>
+
+    <event name="profile_data">
+      <description summary="file descriptor to the profile data">
+        This event occurs after a get_profile_fd request and returns the file
+        descriptor to the ICC profile data of this colorspace.
+      </description>
+      <arg name="fd" type="fd" />
+    </event>
+  </interface>
+</protocol>
