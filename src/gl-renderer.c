@@ -44,6 +44,7 @@ struct gl_shader {
 	GLuint vertex_shader, fragment_shader;
 	GLint proj_uniform;
 	GLint tex_uniforms[3];
+	GLint lut_uniform;
 	GLint alpha_uniform;
 	GLint color_uniform;
 	const char *vertex_source, *fragment_source;
@@ -129,6 +130,7 @@ struct gl_renderer {
 	struct wl_array vtxcnt;
 
 	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target_texture_2d;
+	PFNGLTEXIMAGE3DOESPROC teximage3d;
 	PFNEGLCREATEIMAGEKHRPROC create_image;
 	PFNEGLDESTROYIMAGEKHRPROC destroy_image;
 
@@ -147,16 +149,22 @@ struct gl_renderer {
 
 	int has_egl_buffer_age;
 
+	int has_texture_3d;
+
 	int has_configless_context;
 
 	struct gl_shader texture_shader_rgba;
+	struct gl_shader texture_shader_rgba_lut;
 	struct gl_shader texture_shader_rgbx;
+	struct gl_shader texture_shader_rgbx_lut;
 	struct gl_shader texture_shader_egl_external;
+	struct gl_shader texture_shader_egl_external_lut;
 	struct gl_shader texture_shader_y_uv;
 	struct gl_shader texture_shader_y_u_v;
 	struct gl_shader texture_shader_y_xuxv;
 	struct gl_shader invert_color_shader;
 	struct gl_shader solid_shader;
+	struct gl_shader fb_shader;
 	struct gl_shader *current_shader;
 
 	struct wl_signal destroy_signal;
@@ -580,6 +588,8 @@ shader_uniforms(struct gl_shader *shader,
 
 	for (i = 0; i < gs->num_textures; i++)
 		glUniform1i(shader->tex_uniforms[i], i);
+
+	glUniform1i(shader->lut_uniform, i);
 }
 
 static void
@@ -1468,6 +1478,16 @@ static const char vertex_shader[] =
 	"  gl_FragColor.b = y + 2.01723214 * u;\n"			\
 	"  gl_FragColor.a = alpha;\n"
 
+#define FRAGMENT_LUT_ENABLE						\
+	"#extension GL_OES_texture_3D : enable\n"
+
+#define FRAGMENT_LUT_VARS						\
+	"uniform sampler3D lut;\n"
+
+#define FRAGMENT_LUT_APPLY						\
+	"  gl_FragColor.rgb = texture3D(lut,\n"				\
+	"    gl_FragColor.rgb / gl_FragColor.a).rgb * gl_FragColor.a;\n"
+
 static const char fragment_debug[] =
 	"  gl_FragColor = vec4(0.0, 0.3, 0.0, 0.2) + gl_FragColor * 0.8;\n";
 
@@ -1484,6 +1504,19 @@ static const char texture_fragment_shader_rgba[] =
 	"   gl_FragColor = alpha * texture2D(tex, v_texcoord)\n;"
 	;
 
+static const char texture_fragment_shader_rgba_lut[] =
+	FRAGMENT_LUT_ENABLE
+	"precision mediump float;\n"
+	"varying vec2 v_texcoord;\n"
+	"uniform sampler2D tex;\n"
+	"uniform float alpha;\n"
+	FRAGMENT_LUT_VARS
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor = alpha * texture2D(tex, v_texcoord)\n;"
+	FRAGMENT_LUT_APPLY
+	;
+
 static const char texture_fragment_shader_rgbx[] =
 	"precision mediump float;\n"
 	"varying vec2 v_texcoord;\n"
@@ -1495,6 +1528,20 @@ static const char texture_fragment_shader_rgbx[] =
 	"   gl_FragColor.a = alpha;\n"
 	;
 
+static const char texture_fragment_shader_rgbx_lut[] =
+	FRAGMENT_LUT_ENABLE
+	"precision mediump float;\n"
+	"varying vec2 v_texcoord;\n"
+	"uniform sampler2D tex;\n"
+	"uniform float alpha;\n"
+	FRAGMENT_LUT_VARS
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor.rgb = alpha * texture2D(tex, v_texcoord).rgb\n;"
+	"   gl_FragColor.a = alpha;\n"
+	FRAGMENT_LUT_APPLY
+	;
+
 static const char texture_fragment_shader_egl_external[] =
 	"#extension GL_OES_EGL_image_external : require\n"
 	"precision mediump float;\n"
@@ -1504,6 +1551,20 @@ static const char texture_fragment_shader_egl_external[] =
 	"void main()\n"
 	"{\n"
 	"   gl_FragColor = alpha * texture2D(tex, v_texcoord)\n;"
+	;
+
+static const char texture_fragment_shader_egl_external_lut[] =
+	FRAGMENT_LUT_ENABLE
+	"#extension GL_OES_EGL_image_external : require\n"
+	"precision mediump float;\n"
+	"varying vec2 v_texcoord;\n"
+	"uniform samplerExternalOES tex;\n"
+	"uniform float alpha;\n"
+	FRAGMENT_LUT_VARS
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor = alpha * texture2D(tex, v_texcoord)\n;"
+	FRAGMENT_LUT_APPLY
 	;
 
 static const char texture_fragment_shader_y_uv[] =
@@ -1553,6 +1614,18 @@ static const char solid_fragment_shader[] =
 	"void main()\n"
 	"{\n"
 	"   gl_FragColor = alpha * color\n;"
+	;
+
+static const char fb_fragment_shader[] =
+	FRAGMENT_LUT_ENABLE
+	"precision mediump float;\n"
+	"uniform sampler2D tex;\n"
+	"varying vec2 v_texcoord;\n"
+	FRAGMENT_LUT_VARS
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor = texture2D(tex, v_texcoord);\n"
+	FRAGMENT_LUT_APPLY
 	;
 
 static int
@@ -1619,6 +1692,7 @@ shader_init(struct gl_shader *shader, struct gl_renderer *renderer,
 	shader->tex_uniforms[0] = glGetUniformLocation(shader->program, "tex");
 	shader->tex_uniforms[1] = glGetUniformLocation(shader->program, "tex1");
 	shader->tex_uniforms[2] = glGetUniformLocation(shader->program, "tex2");
+	shader->lut_uniform = glGetUniformLocation(shader->program, "lut");
 	shader->alpha_uniform = glGetUniformLocation(shader->program, "alpha");
 	shader->color_uniform = glGetUniformLocation(shader->program, "color");
 
@@ -2038,12 +2112,24 @@ compile_shaders(struct weston_compositor *ec)
 	gr->texture_shader_rgba.vertex_source = vertex_shader;
 	gr->texture_shader_rgba.fragment_source = texture_fragment_shader_rgba;
 
+	gr->texture_shader_rgba_lut.vertex_source = vertex_shader;
+	gr->texture_shader_rgba_lut.fragment_source =
+		texture_fragment_shader_rgba_lut;
+
 	gr->texture_shader_rgbx.vertex_source = vertex_shader;
 	gr->texture_shader_rgbx.fragment_source = texture_fragment_shader_rgbx;
+
+	gr->texture_shader_rgbx_lut.vertex_source = vertex_shader;
+	gr->texture_shader_rgbx_lut.fragment_source =
+		texture_fragment_shader_rgbx_lut;
 
 	gr->texture_shader_egl_external.vertex_source = vertex_shader;
 	gr->texture_shader_egl_external.fragment_source =
 		texture_fragment_shader_egl_external;
+
+	gr->texture_shader_egl_external_lut.vertex_source = vertex_shader;
+	gr->texture_shader_egl_external_lut.fragment_source =
+		texture_fragment_shader_egl_external_lut;
 
 	gr->texture_shader_y_uv.vertex_source = vertex_shader;
 	gr->texture_shader_y_uv.fragment_source = texture_fragment_shader_y_uv;
@@ -2059,6 +2145,9 @@ compile_shaders(struct weston_compositor *ec)
 	gr->solid_shader.vertex_source = vertex_shader;
 	gr->solid_shader.fragment_source = solid_fragment_shader;
 
+	gr->fb_shader.vertex_source = vertex_shader;
+	gr->fb_shader.fragment_source = fb_fragment_shader;
+
 	return 0;
 }
 
@@ -2073,12 +2162,16 @@ fragment_debug_binding(struct weston_seat *seat, uint32_t time, uint32_t key,
 	gr->fragment_shader_debug ^= 1;
 
 	shader_release(&gr->texture_shader_rgba);
+	shader_release(&gr->texture_shader_rgba_lut);
 	shader_release(&gr->texture_shader_rgbx);
+	shader_release(&gr->texture_shader_rgbx_lut);
 	shader_release(&gr->texture_shader_egl_external);
+	shader_release(&gr->texture_shader_egl_external_lut);
 	shader_release(&gr->texture_shader_y_uv);
 	shader_release(&gr->texture_shader_y_u_v);
 	shader_release(&gr->texture_shader_y_xuxv);
 	shader_release(&gr->solid_shader);
+	shader_release(&gr->fb_shader);
 
 	/* Force use_shader() to call glUseProgram(), since we need to use
 	 * the recompiled version of the shader. */
@@ -2146,6 +2239,9 @@ gl_renderer_setup(struct weston_compositor *ec, EGLSurface egl_surface)
 	gr->image_target_texture_2d =
 		(void *) eglGetProcAddress("glEGLImageTargetTexture2DOES");
 
+	gr->teximage3d =
+		(void *) eglGetProcAddress("glTexImage3DOES");
+
 	extensions = (const char *) glGetString(GL_EXTENSIONS);
 	if (!extensions) {
 		weston_log("Retrieving GL extension string failed.\n");
@@ -2169,6 +2265,12 @@ gl_renderer_setup(struct weston_compositor *ec, EGLSurface egl_surface)
 
 	if (strstr(extensions, "GL_OES_EGL_image_external"))
 		gr->has_egl_image_external = 1;
+
+	if (strstr(extensions, "GL_OES_texture_3D"))
+		gr->has_texture_3d = 1;
+	else
+		weston_log("warning: GL_OES_texture_3D not supported. "
+			   "Color correction will be disabled.\n");
 
 	glActiveTexture(GL_TEXTURE0);
 
