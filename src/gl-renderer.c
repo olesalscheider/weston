@@ -39,7 +39,7 @@
 #include <EGL/eglext.h>
 #include "weston-egl-ext.h"
 
-#include "cms-server-protocol.h"
+#include "colorcorrection.h"
 
 struct gl_shader {
 	GLuint program;
@@ -1138,7 +1138,8 @@ gl_renderer_repaint_output(struct weston_output *output,
 	if (use_output(output) < 0)
 		return;
 
-	if (gr->has_texture_3d && output->colorspace->clut.data)
+	if (gr->has_texture_3d && output->colorspace &&
+	    output->colorspace->clut.data)
 		use_fb(output, &go->fb_texture);
 
 	/* if debugging, redraw everything outside the damage to clean up
@@ -1172,7 +1173,8 @@ gl_renderer_repaint_output(struct weston_output *output,
 	draw_output_borders(output, border_damage);
 	pixman_region32_copy(&output->previous_damage, output_damage);
 
-	if (gr->has_texture_3d && output->colorspace->clut.data) {
+	if (gr->has_texture_3d && output->colorspace &&
+	    output->colorspace->clut.data) {
 		gl_renderer_attach_output_lut(output);
 		if (draw_fb(output) < 0)
 			return;
