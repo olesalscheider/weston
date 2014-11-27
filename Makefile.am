@@ -53,6 +53,8 @@ weston_CFLAGS = $(GCC_CFLAGS) $(COMPOSITOR_CFLAGS) $(LIBUNWIND_CFLAGS)
 weston_LDADD = $(COMPOSITOR_LIBS) $(LIBUNWIND_LIBS) \
 	$(DLOPEN_LIBS) -lm libshared.la
 if HAVE_LCMS
+weston_CPPFLAGS += -DHAVE_LCMS=1
+weston_CFLAGS += $(LCMS_CFLAGS)
 weston_LDADD += $(LCMS_LIBS)
 endif
 
@@ -79,6 +81,12 @@ weston_SOURCES =					\
 	shared/matrix.h					\
 	shared/zalloc.h					\
 	src/weston-egl-ext.h
+
+if HAVE_LCMS
+weston_SOURCES += src/colorcorrection.c
+else
+weston_SOURCES += src/colorcorrection-stubs.c
+endif
 
 nodist_weston_SOURCES =					\
 	protocol/screenshooter-protocol.c		\

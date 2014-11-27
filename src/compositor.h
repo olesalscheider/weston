@@ -32,7 +32,6 @@ extern "C" {
 #include <time.h>
 #include <pixman.h>
 #include <xkbcommon/xkbcommon.h>
-#include <glib.h>
 
 #define WL_HIDE_DEPRECATED
 #include <wayland-server.h>
@@ -42,10 +41,6 @@ extern "C" {
 #include "config-parser.h"
 #include "zalloc.h"
 #include "timeline-object.h"
-
-#ifdef HAVE_LCMS
-#include <lcms2.h>
-#endif
 
 #ifndef MIN
 #define MIN(x,y) (((x) < (y)) ? (x) : (y))
@@ -180,24 +175,6 @@ enum dpms_enum {
 	WESTON_DPMS_STANDBY,
 	WESTON_DPMS_SUSPEND,
 	WESTON_DPMS_OFF
-};
-
-struct weston_clut {
-	unsigned points;
-	char *data;
-};
-
-struct weston_colorspace {
-#ifdef HAVE_LCMS
-	cmsHPROFILE lcms_handle;
-#endif
-	struct weston_clut clut;
-
-	int destroyable;
-	int refcount;
-	int input;
-
-	struct weston_compositor *compositor;
 };
 
 struct weston_output {
@@ -699,10 +676,11 @@ struct weston_compositor {
 
 	int exit_code;
 
-	struct weston_colorspace srgb_colorspace;
-	struct weston_colorspace blending_colorspace;
-	GHashTable *input_colorspaces;
-	GHashTable *output_colorspaces;
+	struct weston_colorspace *srgb_output_colorspace;
+	struct weston_colorspace *srgb_colorspace;
+	struct weston_colorspace *blending_colorspace;
+	struct wl_list input_colorspaces;
+	struct wl_list output_colorspaces;
 };
 
 struct weston_buffer {
@@ -1482,12 +1460,6 @@ weston_stable_fade_run(struct weston_view *front_view, float start,
 struct weston_view_animation *
 weston_slide_run(struct weston_view *view, float start, float stop,
 		 weston_view_animation_done_func_t done, void *data);
-
-struct weston_colorspace *
-weston_colorspace_from_fd(int fd, int input, struct weston_compositor *ec);
-
-void
-weston_colorspace_destroy(struct weston_colorspace *colorspace);
 
 void
 weston_surface_set_color(struct weston_surface *surface,

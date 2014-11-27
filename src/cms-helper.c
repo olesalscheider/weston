@@ -34,6 +34,7 @@
 
 #include "compositor.h"
 #include "cms-helper.h"
+#include "colorcorrection.h"
 
 #ifdef HAVE_LCMS
 static void
@@ -76,7 +77,7 @@ weston_cms_set_color_profile(struct weston_output *o,
 	close(fd);
 	if (o->colorspace == NULL) {
 		weston_log("Failed to read ICC profile for output %s\n", o->name);
-		o->colorspace = &o->compositor->srgb_colorspace;
+		o->colorspace = o->compositor->srgb_output_colorspace;
 	}
 
 	if (!o->set_gamma)
@@ -120,8 +121,8 @@ weston_cms_destroy_profile(struct weston_output *o,
 	cmsCloseProfile(p->lcms_handle);
 #endif
 
-	weston_colorspace_destroy(o->colorspace);
-	o->colorspace = &o->compositor->srgb_colorspace;
+	weston_colorspace_destroy(o->colorspace, 0);
+	o->colorspace = o->compositor->srgb_output_colorspace;
 
 	free(p->filename);
 	free(p);
